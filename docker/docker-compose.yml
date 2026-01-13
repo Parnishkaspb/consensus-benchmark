@@ -1,0 +1,35 @@
+version: '3.8'
+
+services:
+  geth:
+    image: ethereum/client-go:latest
+    container_name: geth-pow-test
+    ports:
+      - "8545:8545"
+      - "8546:8546"
+      - "30303:30303"
+      - "30303:30303/udp"
+    volumes:
+      - ./data:/root/.ethereum
+    command: >
+      --dev
+      --dev.period 2
+      --http
+      --http.addr 0.0.0.0
+      --http.port 8545
+      --http.api eth,net,web3,miner,personal,txpool,admin,debug
+      --http.corsdomain "*"
+      --ws
+      --ws.addr 0.0.0.0
+      --ws.port 8546
+      --ws.api eth,net,web3,miner,personal,txpool,admin,debug
+      --ws.origins "*"
+      --allow-insecure-unlock
+      --rpc.allow-unprotected-txs
+      --verbosity 3
+      --mine
+      --miner.gasprice 0
+      --networkid 1337
+      --nodiscover
+      --maxpeers 0
+    restart: unless-stopped
