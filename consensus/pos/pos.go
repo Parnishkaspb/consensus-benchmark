@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"consensus-benchmark/internal/energy"
 	"consensus-benchmark/internal/types"
 )
 
@@ -218,11 +219,11 @@ func (p *PoS) GetMetrics() types.Metrics {
 	p.metrics.MemoryUsageMB = totalMemory / count
 	p.metrics.TotalTransactions = totalTransactions
 	p.metrics.ConfirmedBlocks = totalBlocks
-	p.metrics.EnergyConsumption = 5 * float64(p.nodeCount) // Среднее энергопотребление
 	p.metrics.Throughput = p.metrics.AvgTPS
 	p.metrics.SuccessRate = 0.98        // Высокий успех
 	p.metrics.ConsensusTimeAvg = 2000.0 // Время блока 2 секунды
 	p.metrics.NetworkUsageMB = float64(p.nodeCount) * 0.5
+	p.metrics.EnergyConsumption = energy.Index(p.nodeCount, p.metrics.CPUUsagePercent, p.metrics.MemoryUsageMB, p.metrics.NetworkUsageMB)
 	p.metrics.Timestamp = time.Now()
 
 	return p.metrics

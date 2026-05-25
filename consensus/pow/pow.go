@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"consensus-benchmark/internal/energy"
 	"consensus-benchmark/internal/types"
 )
 
@@ -243,9 +244,6 @@ func (g *GethAdapter) updateMetricsFromGethLocked() {
 	// Получаем хешрейт
 	if hashrate, err := g.getHashrate(); err == nil {
 		g.hashrate = hashrate
-		// Рассчитываем энергопотребление (условные единицы)
-		// Пример: 100 MH/s = 100 усл. ед.
-		g.metrics.EnergyConsumption = hashrate / 1e6 * 100
 	}
 
 	// Получаем информацию о синхронизации
@@ -273,6 +271,7 @@ func (g *GethAdapter) updateMetricsFromGethLocked() {
 	g.metrics.ConsensusTimeAvg = 15000.0    // Время блока 15 секунд
 	g.metrics.NetworkUsageMB = 50.0         // Сетевой трафик
 	g.metrics.ForkCount = 0                 // В идеальной сети форков нет
+	g.metrics.EnergyConsumption = energy.Index(g.nodeCount, g.metrics.CPUUsagePercent, g.metrics.MemoryUsageMB, g.metrics.NetworkUsageMB)
 	g.metrics.Timestamp = time.Now()
 
 	// Логируем метрики каждые 30 секунд
