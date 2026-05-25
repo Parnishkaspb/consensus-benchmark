@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	"consensus-benchmark/consensus"
 	"consensus-benchmark/consensus/dag"
+	"consensus-benchmark/consensus/hybrid"
 	"consensus-benchmark/consensus/pbft"
 	"consensus-benchmark/consensus/pos"
 	"consensus-benchmark/consensus/pow"
@@ -25,6 +27,17 @@ import (
 func main() {
 	log.SetOutput(os.Stdout)
 	log.SetFlags(log.LstdFlags)
+
+	var (
+		quick          = flag.Bool("quick", false, "run quick test (15s)")
+		genTPS         = flag.Int("tps", 20, "generator transactions per second")
+		hybridNodes    = flag.Int("hybridNodes", 4, "hybrid node count")
+		hybridMaxTx    = flag.Int("hybridMaxTx", 200, "hybrid max tx per vertex")
+		hybridTipCount = flag.Int("hybridTipCount", 2, "hybrid tip count")
+		hybridFrontier = flag.Int("hybridFrontierMax", 20, "hybrid snapshot frontier max")
+		hybridCutMax   = flag.Int("hybridCutMax", 200, "hybrid snapshot cut max")
+	)
+	flag.Parse()
 
 	fmt.Println("=== ТЕСТОВЫЙ СТЕНД 4 АЛГОРИТМОВ КОНСЕНСУСА ===")
 	fmt.Println("Алгоритмы: PBFT, PoS, PoW (через Geth Docker), DAG")
@@ -49,6 +62,11 @@ func main() {
 		system  consensus.ConsensusInterface
 		enabled bool
 	}{
+		{
+			name:    "Hybrid",
+			system:  hybrid.NewHybrid(),
+			enabled: true,
+		},
 		{
 			name:    "PBFT",
 			system:  pbft.NewPBFT(),
@@ -79,7 +97,7 @@ func main() {
 	txChan := make(chan types.Transaction, 10000)
 
 	// Запускаем генератор транзакций (меньше TPS для PoW)
-	generator := traffic.NewGenerator(20) // 20 TPS чтобы не перегрузить PoW
+	generator := traffic.NewGenerator(*genTPS) // по умолчанию 20 TPS чтобы не перегрузить PoW
 	generator.Start(txChan)
 
 	// sync.Map для thread-safe хранения запущенных систем
@@ -103,6 +121,20 @@ func main() {
 			var nodeCount int
 
 			switch sysName {
+			case "Hybrid":
+				config = map[string]interface{}{
+					"min_delay_ms":      10,
+					"max_delay_ms":      50,
+					"drop_prob":         0.0,
+					"build_every_ms":    80,
+					"snap_every_ms":     300,
+					"seed":              42,
+					"tip_count":         *hybridTipCount,
+					"max_tx_per_vertex": *hybridMaxTx,
+					"frontier_max":      *hybridFrontier,
+					"cut_max":           *hybridCutMax,
+				}
+				nodeCount = *hybridNodes
 			case "PBFT":
 				config = map[string]interface{}{
 					"faulty_nodes": 1,
@@ -231,7 +263,7 @@ func main() {
 
 	// Таймер для теста
 	testDuration := 120 * time.Second
-	if len(os.Args) > 1 && os.Args[1] == "--quick" {
+	if *quick {
 		testDuration = 15 * time.Second
 	}
 
@@ -254,11 +286,11 @@ func main() {
 	// Ждем немного, чтобы горутины получили сигнал
 	time.Sleep(100 * time.Millisecond)
 
-	// Закрываем канал транзакций
-	close(txChan) // 2. Затем закрываем канал
-
-	// Останавливаем генератор (после закрытия канала)
+	// Сначала останавливаем генератор, чтобы он больше не писал в txChan.
 	generator.Stop()
+
+	// Затем закрываем канал транзакций для обработчиков.
+	close(txChan)
 
 	// Даем дополнительное время на завершение обработчиков
 	time.Sleep(100 * time.Millisecond)
@@ -284,10 +316,10 @@ func main() {
 	}
 
 	// Выводим статистику генератора
-	sent, tps := generator.GetStats()
+	sent, avgTPS := generator.GetStats()
 	fmt.Printf("\n=== СТАТИСТИКА ГЕНЕРАТОРА ===\n")
 	fmt.Printf("Всего отправлено транзакций: %d\n", sent)
-	fmt.Printf("Средний TPS: %.2f\n", tps)
+	fmt.Printf("Средний TPS: %.2f\n", avgTPS)
 
 	// Собираем все системы для анализа
 	var allSystems []consensus.ConsensusInterface

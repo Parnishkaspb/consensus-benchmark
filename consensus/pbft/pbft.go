@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"consensus-benchmark/internal/energy"
 	"consensus-benchmark/internal/types"
 )
 
@@ -21,8 +22,9 @@ type PBFTNode struct {
 	messages      chan PBFTMessage
 	transactions  []types.Transaction
 	committedLogs []types.Block
-	prepared      map[string]bool
-	committed     map[string]bool
+	prepared      map[string]map[int]bool
+	committed     map[string]map[int]bool
+	finalized     map[string]bool
 	mu            sync.RWMutex
 	stopChan      chan struct{}
 	metrics       types.Metrics
@@ -50,6 +52,7 @@ type PBFT struct {
 	mu                 sync.RWMutex
 	transactionCounter int64
 	lastHash           string
+	startTime          time.Time
 }
 
 func NewPBFT() *PBFT {
@@ -78,8 +81,9 @@ func (p *PBFT) Initialize(nodes int, config map[string]interface{}) error {
 			view:      0,
 			primary:   0, // Первый узел - primary
 			messages:  make(chan PBFTMessage, 1000),
-			prepared:  make(map[string]bool),
-			committed: make(map[string]bool),
+			prepared:  make(map[string]map[int]bool),
+			committed: make(map[string]map[int]bool),
+			finalized: make(map[string]bool),
 			stopChan:  make(chan struct{}),
 			startTime: time.Now(),
 			metrics: types.Metrics{
@@ -112,6 +116,7 @@ func (p *PBFT) Start(ctx context.Context) error {
 	p.ctx, p.cancel = context.WithCancel(ctx)
 	p.running = true
 	p.metrics.Timestamp = time.Now()
+	p.startTime = p.metrics.Timestamp
 
 	// Запускаем все узлы
 	for _, node := range p.nodes {
@@ -209,35 +214,52 @@ func (p *PBFT) GetMetrics() types.Metrics {
 
 	// Собираем метрики со всех узлов
 	var totalCPU, totalMemory float64
-	var totalTransactions, totalBlocks int64
+	uniqueBlocks := make(map[string]types.Block)
+	var totalMessages int64
 
 	for _, node := range p.nodes {
 		node.mu.RLock()
-		totalTransactions += int64(len(node.transactions))
-		totalBlocks += int64(len(node.committedLogs))
+		for _, block := range node.committedLogs {
+			uniqueBlocks[block.Hash] = block
+		}
+		totalMessages += node.totalMessages
 		totalCPU += 5.0     // Примерное значение CPU
 		totalMemory += 50.0 // Примерное значение памяти
 		node.mu.RUnlock()
 	}
 
+	var confirmedTx int64
+	for _, block := range uniqueBlocks {
+		confirmedTx += int64(len(block.Transactions))
+	}
+
 	// Рассчитываем средние значения
-	duration := time.Since(p.metrics.Timestamp).Seconds()
+	duration := time.Since(p.startTime).Seconds()
 	if duration > 0 {
-		p.metrics.AvgTPS = float64(totalTransactions) / duration
+		p.metrics.AvgTPS = float64(confirmedTx) / duration
 		p.metrics.AvgLatencyMs = 100.0 // Примерная задержка
 		p.metrics.MaxLatencyMs = 200.0
 		p.metrics.MinLatencyMs = 50.0
 	}
 
-	p.metrics.TotalTransactions = totalTransactions
-	p.metrics.ConfirmedBlocks = totalBlocks
+	submitted := p.transactionCounter
+	p.metrics.TotalTransactions = confirmedTx
+	p.metrics.ConfirmedBlocks = int64(len(uniqueBlocks))
 	p.metrics.CPUUsagePercent = totalCPU / float64(len(p.nodes))
 	p.metrics.MemoryUsageMB = totalMemory / float64(len(p.nodes))
-	p.metrics.SuccessRate = 1.0                             // PBFT гарантирует согласие при f < N/3
-	p.metrics.EnergyConsumption = 10 * float64(p.nodeCount) // Низкое энергопотребление
+	if submitted > 0 {
+		p.metrics.SuccessRate = float64(confirmedTx) / float64(submitted)
+		if p.metrics.SuccessRate > 1 {
+			p.metrics.SuccessRate = 1
+		}
+	} else {
+		p.metrics.SuccessRate = 0
+	}
 	p.metrics.Throughput = p.metrics.AvgTPS
 	p.metrics.ConsensusTimeAvg = 150.0 // Среднее время консенсуса
-	p.metrics.NetworkUsageMB = float64(p.metrics.TotalMessages) * 0.001
+	p.metrics.TotalMessages = totalMessages
+	p.metrics.NetworkUsageMB = float64(totalMessages) * 0.001
+	p.metrics.EnergyConsumption = energy.Index(p.nodeCount, p.metrics.CPUUsagePercent, p.metrics.MemoryUsageMB, p.metrics.NetworkUsageMB)
 	p.metrics.Timestamp = time.Now()
 
 	return p.metrics
@@ -312,7 +334,7 @@ func (n *PBFTNode) handlePrePrepare(msg PBFTMessage) {
 		return
 	}
 
-	key := fmt.Sprintf("%d-%d", msg.Sequence, msg.View)
+	blockKey := fmt.Sprintf("%d-%d-%s", msg.Sequence, msg.View, msg.Block.Hash)
 
 	// Отправляем PREPARE
 	prepareMsg := PBFTMessage{
@@ -333,23 +355,20 @@ func (n *PBFTNode) handlePrePrepare(msg PBFTMessage) {
 		}
 	}
 
-	n.prepared[key] = true
+	n.recordVote(n.prepared, blockKey, n.ID)
 }
 
 func (n *PBFTNode) handlePrepare(msg PBFTMessage) {
-	key := fmt.Sprintf("%d-%d", msg.Sequence, msg.View)
+	blockKey := fmt.Sprintf("%d-%d-%s", msg.Sequence, msg.View, msg.Block.Hash)
+	n.recordVote(n.prepared, blockKey, msg.NodeID)
 
 	// Подсчитываем PREPARE сообщения
-	prepareCount := 0
-	for _ = range n.nodes {
-		if n.prepared[fmt.Sprintf("%d-%d", msg.Sequence, msg.View)] {
-			prepareCount++
-		}
-	}
+	prepareCount := len(n.prepared[blockKey])
 
 	// Если получили 2f+1 PREPARE сообщений, отправляем COMMIT
 	f := (len(n.nodes) - 1) / 3
-	if prepareCount >= 2*f+1 && !n.committed[key] {
+	if prepareCount >= 2*f+1 && !n.committed[blockKey][n.ID] {
+		n.recordVote(n.committed, blockKey, n.ID)
 		commitMsg := PBFTMessage{
 			Type:     "COMMIT",
 			NodeID:   n.ID,
@@ -359,31 +378,25 @@ func (n *PBFTNode) handlePrepare(msg PBFTMessage) {
 		}
 
 		for _, otherNode := range n.nodes {
-			if otherNode.ID != n.ID {
-				select {
-				case otherNode.messages <- commitMsg:
-				default:
-				}
+			select {
+			case otherNode.messages <- commitMsg:
+			default:
 			}
 		}
 	}
 }
 
 func (n *PBFTNode) handleCommit(msg PBFTMessage) {
-	key := fmt.Sprintf("%d-%d", msg.Sequence, msg.View)
+	blockKey := fmt.Sprintf("%d-%d-%s", msg.Sequence, msg.View, msg.Block.Hash)
+	n.recordVote(n.committed, blockKey, msg.NodeID)
 
 	// Подсчитываем COMMIT сообщения
-	commitCount := 0
-	for _ = range n.nodes {
-		if n.committed[fmt.Sprintf("%d-%d", msg.Sequence, msg.View)] {
-			commitCount++
-		}
-	}
+	commitCount := len(n.committed[blockKey])
 
 	// Если получили 2f+1 COMMIT сообщений, коммитим блок
 	f := (len(n.nodes) - 1) / 3
-	if commitCount >= 2*f+1 {
-		n.committed[key] = true
+	if commitCount >= 2*f+1 && !n.finalized[blockKey] {
+		n.finalized[blockKey] = true
 		n.committedLogs = append(n.committedLogs, msg.Block)
 		n.transactions = append(n.transactions, msg.Block.Transactions...)
 
@@ -391,4 +404,11 @@ func (n *PBFTNode) handleCommit(msg PBFTMessage) {
 		n.metrics.ConfirmedBlocks++
 		n.metrics.TotalTransactions += int64(len(msg.Block.Transactions))
 	}
+}
+
+func (n *PBFTNode) recordVote(votes map[string]map[int]bool, key string, nodeID int) {
+	if votes[key] == nil {
+		votes[key] = make(map[int]bool)
+	}
+	votes[key][nodeID] = true
 }

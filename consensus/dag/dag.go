@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"consensus-benchmark/internal/energy"
 	"consensus-benchmark/internal/types"
 )
 
@@ -274,11 +275,11 @@ func (d *DAG) GetMetrics() types.Metrics {
 	d.metrics.MemoryUsageMB = totalMemory / count
 	d.metrics.TotalTransactions = totalVertices
 	d.metrics.ConfirmedBlocks = confirmedVertices
-	d.metrics.EnergyConsumption = 2 * float64(d.nodeCount) // Низкое энергопотребление
-	d.metrics.Throughput = d.metrics.AvgTPS * 10           // DAG может обрабатывать параллельно
+	d.metrics.Throughput = d.metrics.AvgTPS * 10 // DAG может обрабатывать параллельно
 	d.metrics.SuccessRate = float64(confirmedVertices) / float64(totalVertices)
 	d.metrics.ConsensusTimeAvg = 50.0 // Быстрое подтверждение
 	d.metrics.NetworkUsageMB = float64(d.nodeCount) * 0.3
+	d.metrics.EnergyConsumption = energy.Index(d.nodeCount, d.metrics.CPUUsagePercent, d.metrics.MemoryUsageMB, d.metrics.NetworkUsageMB)
 	d.metrics.Timestamp = time.Now()
 
 	return d.metrics
